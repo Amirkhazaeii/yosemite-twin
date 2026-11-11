@@ -1,0 +1,28 @@
+# Today's real snow for the online Yosemite twin: every 6 hours, refresh snow/latest.json (and the Sentinel-2 snow map)
+# from NOAA SNODAS, Sentinel-2 and the CDEC snow sensors, and publish it with GitHub Pages. Source: 06_Online/snow_action.
+name: Snow on the ground
+on:
+  schedule:
+    - cron: "20 */6 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: snow
+jobs:
+  snow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy==2.1.3 pillow==11.0.0
+      - run: python snow/run.py
+      - name: Publish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add snow
+          git commit -m "Snow on the ground, $(date -u '+%Y-%m-%d %H:%M') UTC" || exit 0
+          git push

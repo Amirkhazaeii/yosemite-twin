@@ -19,11 +19,11 @@
 <main><div>
   <h1>Yosemite Digital Twin</h1>
   <p id="msg"><span class="dot"></span>Opening the twin…</p>
-  <p><a id="go" href="https://jail-defensive-emerging-bloom.trycloudflare.com/?ui=2">Open it yourself</a></p>
+  <p><a id="go" href="https://yosemite.amirkhazaei.com/?ui=2">Open it yourself</a></p>
 </div></main>
 <script>
   // forwards to the twin, served from the laptop that runs it (this address changes; this page follows it)
-  const base = 'https://jail-defensive-emerging-bloom.trycloudflare.com', view = location.search || '?ui=2', target = base + '/' + view + location.hash;
+  const base = 'https://yosemite.amirkhazaei.com', view = location.search || '?ui=2', target = base + '/' + view + location.hash;
   document.getElementById('go').href = target;
   fetch(base + '/data/index.json', { mode: 'no-cors', cache: 'no-store' })
     .then(() => location.replace(target))

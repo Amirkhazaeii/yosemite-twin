@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yosemite Digital Twin</title>
+<meta name="description" content="A living 3D model of Yosemite National Park from billions of laser measurements, aerial photos and today's weather.">
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d10; color: #f2f4f7; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+  main { min-height: 100%; display: grid; place-items: center; text-align: center; padding: 24px; box-sizing: border-box; }
+  h1 { font-size: clamp(30px, 6vw, 54px); letter-spacing: -0.03em; margin: 0 0 8px; font-weight: 700; }
+  p { color: #a7adb6; margin: 6px 0; }
+  a { color: #4da3ff; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #4cd964; margin-right: 8px; animation: p 1.2s infinite; }
+  @keyframes p { 50% { opacity: .3; } }
+</style>
+</head>
+<body>
+<main><div>
+  <h1>Yosemite Digital Twin</h1>
+  <p id="msg"><span class="dot"></span>Opening the twin…</p>
+  <p><a id="go" href="https://jail-defensive-emerging-bloom.trycloudflare.com/?ui=2">Open it yourself</a></p>
+</div></main>
+<script>
+  // forwards to the twin, served from the laptop that runs it (this address changes; this page follows it)
+  const base = 'https://jail-defensive-emerging-bloom.trycloudflare.com', view = location.search || '?ui=2', target = base + '/' + view + location.hash;
+  document.getElementById('go').href = target;
+  fetch(base + '/data/index.json', { mode: 'no-cors', cache: 'no-store' })
+    .then(() => location.replace(target))
+    .catch(() => { document.getElementById('msg').textContent = 'The twin is offline right now: the laptop that runs it is off or asleep. Please try again later.'; });
+</script>
+</body>
+</html>

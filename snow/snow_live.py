@@ -2,22 +2,26 @@
 
 - NOAA NOHRSC SNODAS (NSIDC G02158, no login): today's 1 km snow depth and snow water equivalent grid. Only the two
   members we need are read from the daily tar with HTTP range requests (about 1.6 MB, a few MB in winter), and only the
-  rows over the park are decompressed. New grids are posted around 13:00 UTC; until then yesterday's is used.
+  rows over the park are decompressed. New grids are posted around 13:00 UTC; until then yesterday's is used. The box
+  (BOX) covers the twin's whole surroundings (js/surround.js, about 120 x 104 km), so the snow does not stop at an edge.
 - Sentinel-2 L2A scene classification (ESA Copernicus via Microsoft Planetary Computer, no login): where the satellite saw snow,
-  bare ground or nothing (cloud, shadow) at 20 m, resampled by the Planetary Computer onto the twin's own 30 m grid. Newest
-  clear pass of the last 10 days (every few days). Written to 05_WebTwin/data/live/s2_snow_<date>.png: 0 unknown, 128 bare, 255 snow.
+  bare ground or nothing (cloud, shadow) at 20 m, resampled by the Planetary Computer onto the twin's own 30 m grid
+  (05_WebTwin/data/analysis/grid.json: x -31000..18020, z -13020..21000, 1634 x 1134 cells; PC_GRID). Newest
+  clear pass of the last 10 days (every few days). Written to 05_WebTwin/data/live/s2_snow_<date>_<grid>.png: 0 unknown, 128 bare, 255 snow.
   SNODAS for that day is included too, so the browser can tell snow that fell after the pass.
 - CDEC (California Data Exchange Center) snow pillows and depth sensors in and around the twin: hourly readings.
   Each sensor's September median (the ground is bare then) is subtracted, since several read 1-3 inches on bare ground.
 Results are cached in 00_Pipeline/cache (SNODAS per day, Sentinel-2 for 6 hours, stations for an hour)."""
-import datetime as dt, io, json, math, os, statistics, threading, time, urllib.request, zlib
+import datetime as dt, hashlib, io, json, math, os, statistics, threading, time, urllib.request, zlib
 
 PIPE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(PIPE, "cache")
 E0, N0 = 288000.0, 4189000.0                       # the twin's origin (UTM 11N): x = E - E0, z = -(N - N0)
 SNODAS = "https://noaadata.apps.nsidc.org/NOAA/G02158/masked/{y}/{m:02d}_{mon}/SNODAS_{y}{m:02d}{d:02d}.tar"
 GRID = {"cols": 6935, "rows": 3351, "lon0": -124.73333333333333, "lat0": 52.875, "step": 1 / 120}   # masked grid, NW corner
-BOX = {"lon": (-119.75, -119.15), "lat": (37.66, 38.00)}          # the twin and a little around it
+# the twin's surroundings (x -76..44 km, z -40..64 km: lon -120.29..-118.89, lat 37.23..38.19) and two cells more
+BOX = {"lon": (-120.31, -118.87), "lat": (37.20, 38.22)}
+BOX_KEY = hashlib.md5(json.dumps(BOX, sort_keys=True).encode()).hexdigest()[:6]   # in the cache names: a new box reads anew
 CDEC = "https://cdec.water.ca.gov/dynamicapp/req/JSONDataServlet?Stations={s}&SensorNums={n}&dur_code={d}&Start={a}&End={b}"
 STATIONS = [   # id, name, lat, lon, elevation m (CDEC station pages); all report hourly snow depth (sensor 18)
     ("TUM", "Tuolumne Meadows", 37.876215, -119.349968, 2591),
@@ -29,8 +33,9 @@ STATIONS = [   # id, name, lat, lon, elevation m (CDEC station pages); all repor
     ("ERY", "Ellery Lake", 37.934967, -119.232201, 2940),
 ]
 PC_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
-PC_GRID = ("https://planetarycomputer.microsoft.com/api/data/v1/item/bbox/266000,4177000,305000,4201000/1300x800.npy"
+PC_GRID = ("https://planetarycomputer.microsoft.com/api/data/v1/item/bbox/257000,4168000,306020,4202020/1634x1134.npy"
            "?collection=sentinel-2-l2a&item={id}&assets=SCL&coord_crs=EPSG:32611&dst_crs=EPSG:32611&resampling=nearest")
+PC_KEY = hashlib.md5(PC_GRID.encode()).hexdigest()[:6]
 LIVE = os.path.join(os.path.dirname(PIPE), "05_WebTwin", "data", "live")
 UA = {"User-Agent": "YosemiteDigitalTwin/1.0 (local research viewer)"}
 _lock = threading.Lock()
@@ -103,29 +108,44 @@ def _snodas_day(day):
                 vals.append(v if 0 <= v < 20000 else -1)          # depth and SWE are m x 1000 = mm; -9999 = no data
         out[key] = vals
     w, h = c1 - c0 + 1, r1 - r0 + 1
-    # cell centers -> the twin's frame: a plane fit (exact to a few metres over 50 km) turns x, z into grid column, row
-    pts = [(c, r, *latlon_to_xz(g["lat0"] - (r0 + r + 0.5) * s, g["lon0"] + (c0 + c + 0.5) * s)) for r in (0, h - 1) for c in (0, w - 1)]
-    pts.append((w / 2 - 0.5, h / 2 - 0.5, *latlon_to_xz(g["lat0"] - (r0 + h / 2) * s, g["lon0"] + (c0 + w / 2) * s)))
-    fit = lambda k: _plane([(p[2], p[3], p[k]) for p in pts])
-    return {"date": day.isoformat(), "valid": f"{day.isoformat()}T06:00Z", "w": w, "h": h, "col": fit(0), "row": fit(1),
+    # cell centers -> the twin's frame: a quadratic fit over 7 x 7 cell centers (within 5 m over the 140 km box; a plane
+    # was off by up to 600 m at its corners) turns x, z into grid column, row: v = a + b x + c z + d x^2 + e x z + f z^2
+    pts = []
+    for a in range(7):
+        for b in range(7):
+            c, r = a * (w - 1) / 6, b * (h - 1) / 6
+            pts.append((c, r, *latlon_to_xz(g["lat0"] - (r0 + r + 0.5) * s, g["lon0"] + (c0 + c + 0.5) * s)))
+    return {"date": day.isoformat(), "valid": f"{day.isoformat()}T06:00Z", "w": w, "h": h, "col": _quad(pts, 0), "row": _quad(pts, 1),
             "source": "NOAA NOHRSC SNODAS, 1 km (NSIDC G02158)", **out}
 
 
-def _plane(p):
-    """Least squares v = a + b*x + c*z."""
-    n = len(p); sx = sum(q[0] for q in p); sz = sum(q[1] for q in p); sv = sum(q[2] for q in p)
-    sxx = sum(q[0] ** 2 for q in p); szz = sum(q[1] ** 2 for q in p); sxz = sum(q[0] * q[1] for q in p)
-    sxv = sum(q[0] * q[2] for q in p); szv = sum(q[1] * q[2] for q in p)
-    M = [[n, sx, sz], [sx, sxx, sxz], [sz, sxz, szz]]; y = [sv, sxv, szv]
-    det = lambda m: (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-                     + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
-    D = det(M)
-    return [det([[y[i] if j == k else M[i][j] for j in range(3)] for i in range(3)]) / D for k in range(3)]
+def grid_at(p, x, z):
+    """Column or row of a SNODAS grid at the twin's x, z: p from "col" / "row" (3 numbers, a plane: older grids such as
+    climate.json's snow_typical; or 6, quadratic). Works on numbers and numpy arrays."""
+    v = p[0] + p[1] * x + p[2] * z
+    return v + p[3] * x * x + p[4] * x * z + p[5] * z * z if len(p) > 3 else v
+
+
+def _quad(pts, k):
+    """Least squares v = a + b x + c z + d x^2 + e x z + f z^2 (pts: (col, row, x, z)), solved in km for conditioning."""
+    rows = [(1.0, x / 1e3, z / 1e3, (x / 1e3) ** 2, x * z / 1e6, (z / 1e3) ** 2) for _, _, x, z in pts]
+    ys = [p[k] for p in pts]
+    n = 6
+    M = [[sum(r[i] * r[j] for r in rows) for j in range(n)] + [sum(r[i] * y for r, y in zip(rows, ys))] for i in range(n)]
+    for c in range(n):                                   # Gauss-Jordan with partial pivoting
+        piv = max(range(c, n), key=lambda i: abs(M[i][c]))
+        M[c], M[piv] = M[piv], M[c]
+        for i in range(n):
+            if i != c:
+                f = M[i][c] / M[c][c]
+                M[i] = [a - f * b for a, b in zip(M[i], M[c])]
+    sol = [M[i][n] / M[i][i] for i in range(n)]
+    return [v * u for v, u in zip(sol, (1.0, 1e-3, 1e-3, 1e-6, 1e-6, 1e-6))]
 
 
 def snodas_for(day):
     """One day's grid, from the cache or NSIDC."""
-    path = os.path.join(CACHE, f"snodas_{day:%Y%m%d}.json")
+    path = os.path.join(CACHE, f"snodas_{day:%Y%m%d}_{BOX_KEY}.json")
     if os.path.exists(path):
         return json.load(open(path))
     os.makedirs(CACHE, exist_ok=True)
@@ -158,7 +178,7 @@ def sentinel2():
     import numpy as np
     from PIL import Image
     today = dt.datetime.now(dt.timezone.utc).date()
-    body = {"collections": ["sentinel-2-l2a"], "bbox": [-119.70, 37.70, -119.18, 37.98], "limit": 40,
+    body = {"collections": ["sentinel-2-l2a"], "bbox": [-119.77, 37.62, -119.19, 37.95], "limit": 40,
             "datetime": f"{today - dt.timedelta(days=10)}T00:00:00Z/{today + dt.timedelta(days=1)}T00:00:00Z",
             "sortby": [{"field": "datetime", "direction": "desc"}]}
     req = urllib.request.Request(PC_STAC, data=json.dumps(body).encode(), headers={**UA, "Content-Type": "application/json"})
@@ -170,7 +190,7 @@ def sentinel2():
     day = next((d for d in sorted(by_day, reverse=True) if "11SKB" in by_day[d] and by_day[d]["11SKB"][1] < 50), None)
     if day is None:
         raise RuntimeError("no clear Sentinel-2 pass in the last 10 days")
-    png = os.path.join(LIVE, f"s2_snow_{day.replace('-', '')}.png")
+    png = os.path.join(LIVE, f"s2_snow_{day.replace('-', '')}_{PC_KEY}.png")   # named after the grid: a new grid fetches anew
     if not os.path.exists(png):
         def scl(item):
             a = np.load(io.BytesIO(_get(PC_GRID.format(id=item), timeout=180)))
